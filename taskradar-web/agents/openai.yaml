@@ -1,0 +1,4 @@
+interface:
+  display_name: "TaskRadar Web"
+  short_description: "Track agent work in TaskRadar Web"
+  default_prompt: "Use $taskradar-web to record and update this long-running task in TaskRadar Web."

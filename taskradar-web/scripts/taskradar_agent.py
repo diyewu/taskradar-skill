@@ -8,13 +8,19 @@ import datetime as dt
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-CONFIG_PATH = Path.home() / ".config" / "taskradar-skill" / "env"
+CONFIG_DIR = Path.home() / ".config" / "taskradar-skill"
+CONFIG_PATH = CONFIG_DIR / "env"
+REGISTRY_PATH = CONFIG_DIR / "projects.json"
+LOCAL_CONTEXT_DIR = ".taskradar"
+LOCAL_CONTEXT_FILE = "project.json"
 DEFAULT_BASE_URL = "https://taskradar.uydyun.com/app-api/taskradar"
 DEFAULT_AGENT_NAME = "Codex"
 DEFAULT_AGENT_PROVIDER = "codex"
@@ -49,6 +55,10 @@ def normalize_base_url(url: str) -> str:
         if base.endswith(suffix):
             base = base[: -len(suffix)]
     return base
+
+
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def missing_token_message() -> str:
@@ -88,6 +98,240 @@ def require_token(config: dict[str, str]) -> str:
 def slug(value: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip().lower()).strip("-")
     return text[:80] or "task"
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        backup = path.with_name(f"{path.name}.bak.{dt.datetime.now().strftime('%Y%m%d%H%M%S')}")
+        path.replace(backup)
+        raise SystemExit(f"{path} is invalid JSON. Backed up to {backup}.") from error
+    if not isinstance(value, dict):
+        raise SystemExit(f"{path} must contain a JSON object.")
+    return value
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def run_git(args: list[str], cwd: Path | None = None) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd or Path.cwd(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def git_root(cwd: Path | None = None) -> Path | None:
+    root = run_git(["rev-parse", "--show-toplevel"], cwd)
+    return Path(root) if root else None
+
+
+def project_root(cwd: Path | None = None) -> Path:
+    return git_root(cwd) or (cwd or Path.cwd())
+
+
+def normalize_project_key(value: str) -> str:
+    text = value.strip()
+    text = re.sub(r"^ssh://", "", text)
+    text = re.sub(r"^[^@/\s]+@", "", text)
+    text = re.sub(r"^https?://", "", text)
+    text = text.replace(":", "/", 1) if ":" in text.split("/", 1)[0] else text
+    text = re.sub(r"\.git$", "", text)
+    return text.strip("/")
+
+
+def git_project_key(cwd: Path | None = None) -> str | None:
+    remote = run_git(["remote", "get-url", "origin"], cwd)
+    return normalize_project_key(remote) if remote else None
+
+
+def local_context_path(root: Path | None = None) -> Path:
+    return (root or project_root()) / LOCAL_CONTEXT_DIR / LOCAL_CONTEXT_FILE
+
+
+def find_local_context(cwd: Path | None = None) -> tuple[Path, dict[str, Any]] | None:
+    current = (cwd or Path.cwd()).resolve()
+    for path in [current, *current.parents]:
+        candidate = path / LOCAL_CONTEXT_DIR / LOCAL_CONTEXT_FILE
+        if candidate.exists():
+            return candidate, read_json(candidate)
+    return None
+
+
+def load_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
+    registry = read_json(path)
+    projects = registry.get("projects", [])
+    if not isinstance(projects, list):
+        raise SystemExit(f"{path} must contain a projects list.")
+    return {"projects": [item for item in projects if isinstance(item, dict)]}
+
+
+def save_registry(registry: dict[str, Any], path: Path = REGISTRY_PATH) -> None:
+    write_json(path, registry)
+
+
+def find_registry_project(
+    project_key: str | None,
+    project_title: str | None = None,
+    registry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    registry = registry or load_registry()
+    projects = registry.get("projects", [])
+    if project_key:
+        for item in projects:
+            if item.get("project_key") == project_key:
+                return dict(item)
+    if project_title:
+        for item in projects:
+            if item.get("project_title") == project_title:
+                return dict(item)
+    return {}
+
+
+def upsert_registry_project(context: dict[str, Any], workspace: Path | None = None) -> None:
+    project_key = context.get("project_key")
+    if not project_key:
+        return
+    registry = load_registry()
+    projects = [
+        item for item in registry["projects"] if item.get("project_key") != project_key
+    ]
+    projects.append(
+        {
+            "project_key": project_key,
+            "project_title": context.get("project_title") or project_key,
+            **optional_id("project_id", context.get("project_id")),
+            "last_workspace": str(workspace or project_root()),
+            "updated_at": now_iso(),
+        }
+    )
+    save_registry({"projects": projects})
+
+
+def ensure_gitignore_entry(root: Path, entry: str = f"{LOCAL_CONTEXT_DIR}/") -> None:
+    gitignore = root / ".gitignore"
+    lines = gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
+    if entry not in lines:
+        lines.append(entry)
+        gitignore.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def write_local_project_context(
+    context: dict[str, Any],
+    root: Path | None = None,
+    update_gitignore: bool = True,
+) -> Path:
+    root = root or project_root()
+    value = {
+        "project_key": context.get("project_key"),
+        "project_title": context.get("project_title"),
+        **optional_id("project_id", context.get("project_id")),
+        "project_description": context.get("project_description"),
+        "project_priority": context.get("project_priority") or "normal",
+        "updated_at": now_iso(),
+    }
+    write_json(local_context_path(root), {k: v for k, v in value.items() if v})
+    if update_gitignore:
+        ensure_gitignore_entry(root)
+    return local_context_path(root)
+
+
+def load_handoff(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
+    raw = getattr(args, "handoff_file", None) or config.get("TASKRADAR_HANDOFF_FILE")
+    if not raw:
+        return {}
+    value = read_json(Path(raw).expanduser())
+    return {
+        "project_key": value.get("project_key"),
+        "project_title": value.get("project_title"),
+        "project_id": value.get("project_id"),
+        "parent_agent_id": value.get("parent_agent_id"),
+        "parent_task_id": value.get("parent_task_id"),
+        "spawned_by_agent_id": value.get("spawned_by_agent_id"),
+        "agent_role": "subagent",
+    }
+
+
+def apply_handoff(args: argparse.Namespace, config: dict[str, str]) -> dict[str, str]:
+    handoff = load_handoff(args, config)
+    if not handoff:
+        return config
+    values = dict(config)
+    mapping = {
+        "project_key": "TASKRADAR_PROJECT_KEY",
+        "project_title": "TASKRADAR_PROJECT_TITLE",
+        "project_id": "TASKRADAR_PROJECT_ID",
+        "parent_agent_id": "TASKRADAR_PARENT_AGENT_ID",
+        "parent_task_id": "TASKRADAR_PARENT_TASK_ID",
+        "spawned_by_agent_id": "TASKRADAR_SPAWNED_BY_AGENT_ID",
+        "agent_role": "TASKRADAR_AGENT_ROLE",
+    }
+    for source, target in mapping.items():
+        if handoff.get(source) and target not in values:
+            values[target] = str(handoff[source])
+    return values
+
+
+def project_context(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
+    local = find_local_context()
+    local_values = local[1] if local else {}
+    git_key = git_project_key()
+    explicit_key = getattr(args, "project_key", None) or config.get("TASKRADAR_PROJECT_KEY")
+    explicit_title = getattr(args, "project_title", None) or config.get("TASKRADAR_PROJECT_TITLE")
+    registry_key = explicit_key or local_values.get("project_key") or git_key
+    registry_values = find_registry_project(registry_key, explicit_title)
+
+    title = (
+        explicit_title
+        or local_values.get("project_title")
+        or registry_values.get("project_title")
+        or Path.cwd().name
+    )
+    key = explicit_key or local_values.get("project_key") or registry_values.get("project_key")
+    project_id = (
+        registry_values.get("project_id")
+        if explicit_key or explicit_title
+        else local_values.get("project_id") or registry_values.get("project_id")
+    )
+    return {
+        "project_key": key or git_key or slug(title),
+        "project_title": title,
+        "project_id": project_id,
+        "project_description": getattr(args, "project_description", None)
+        or config.get("TASKRADAR_PROJECT_DESCRIPTION")
+        or local_values.get("project_description")
+        or f"Tracked by TaskRadar Skill for {title}",
+        "project_priority": getattr(args, "project_priority", None)
+        or config.get("TASKRADAR_PROJECT_PRIORITY")
+        or local_values.get("project_priority")
+        or "normal",
+        "source": (
+            "cli"
+            if explicit_key or explicit_title
+            else "local-context"
+            if local_values
+            else "global-registry"
+            if registry_values
+            else "git-remote"
+            if git_key
+            else "cwd"
+        ),
+    }
 
 
 def print_json(value: Any) -> None:
@@ -152,12 +396,12 @@ def data_from(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def project_payload(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
-    title = args.project_title or config.get("TASKRADAR_PROJECT_TITLE") or Path.cwd().name
+    context = project_context(args, config)
     return {
-        "external_project_key": args.project_key or config.get("TASKRADAR_PROJECT_KEY") or slug(title),
-        "title": title,
-        "description": args.project_description or f"Tracked by TaskRadar Skill for {title}",
-        "priority": args.project_priority or config.get("TASKRADAR_PROJECT_PRIORITY") or "normal",
+        "external_project_key": context["project_key"],
+        "title": context["project_title"],
+        "description": context["project_description"],
+        "priority": context["project_priority"],
     }
 
 
@@ -193,7 +437,51 @@ def ensure_project(args: argparse.Namespace, config: dict[str, str]) -> dict[str
     payload = project_payload(args, config)
     if args.dry_run:
         return {"request": {"method": "POST", "path": "/agent/projects/ensure", "body": payload}}
-    return api_call(config, "POST", "/agent/projects/ensure", payload)
+    response = api_call(config, "POST", "/agent/projects/ensure", payload)
+    persist_project_context(args, payload, response)
+    return response
+
+
+def project_context_from_response(
+    payload: dict[str, Any],
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    data = data_from(response)
+    return {
+        "project_key": payload.get("external_project_key"),
+        "project_title": payload.get("title"),
+        "project_id": str(data.get("id")) if data.get("id") is not None else None,
+        "project_description": payload.get("description"),
+        "project_priority": payload.get("priority"),
+    }
+
+
+def should_write_local_context(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "write_local_context", True))
+
+
+def persist_project_context(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    context = project_context_from_response(payload, response)
+    written: dict[str, Any] = {}
+    if should_write_local_context(args):
+        written["local_context"] = str(write_local_project_context(context))
+    upsert_registry_project(context)
+    written["registry"] = str(REGISTRY_PATH)
+    return written
+
+
+def join_project(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
+    payload = project_payload(args, config)
+    if args.dry_run:
+        return {"request": {"method": "POST", "path": "/agent/projects/ensure", "body": payload}}
+    response = api_call(config, "POST", "/agent/projects/ensure", payload)
+    context = project_context_from_response(payload, response)
+    written = persist_project_context(args, payload, response)
+    return {"project": context, **written}
 
 
 def ensure_agent(
@@ -276,6 +564,20 @@ def ensure_task(args: argparse.Namespace, config: dict[str, str]) -> dict[str, A
     return api_call(config, "POST", "/agent/tasks/ensure", payload)
 
 
+def list_projects(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
+    return load_registry()
+
+
+def current_project(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
+    context = project_context(args, config)
+    return {
+        "source": context["source"],
+        "project_key": context["project_key"],
+        "project_title": context["project_title"],
+        **optional_id("project_id", context.get("project_id")),
+    }
+
+
 def patch_status(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
     payload: dict[str, Any] = {"status": args.status}
     if args.next_action:
@@ -328,6 +630,12 @@ def self_test(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any
     assert normalize_base_url("https://x/app-api/taskradar/agent") == "https://x/app-api/taskradar"
     assert slug("TaskRadar Web!") == "taskradar-web"
     assert parse_remind_at("1782963000000") == 1782963000000
+    assert normalize_project_key("https://gitlab.udyun.net/opc/taskradar-web.git") == (
+        "gitlab.udyun.net/opc/taskradar-web"
+    )
+    assert normalize_project_key("git@gitlab.udyun.net:opc/taskradar-web.git") == (
+        "gitlab.udyun.net/opc/taskradar-web"
+    )
     test_config: dict[str, str] = {}
 
     args.dry_run = True
@@ -335,12 +643,14 @@ def self_test(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any
     args.project_key = "taskradar-web"
     args.project_description = None
     args.project_priority = None
+    args.write_local_context = True
     args.agent_name = None
     args.agent_provider = None
     args.session_name = None
     args.session_id = None
     args.agent_role = None
     args.parent_agent_id = None
+    args.handoff_file = None
     args.project_id = None
     args.agent_id = None
     args.conversation_id = "self-test"
@@ -394,6 +704,22 @@ def self_test(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any
         assert "parent-agent-id" in str(exc)
     else:
         raise AssertionError("subagent without parent_agent_id should fail")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        path = write_local_project_context(
+            {
+                "project_key": "example.test/repo",
+                "project_title": "Example Repo",
+                "project_id": "123",
+                "project_priority": "normal",
+            },
+            root,
+        )
+        assert path.exists()
+        assert ".taskradar/" in (root / ".gitignore").read_text(encoding="utf-8")
+        context = read_json(path)
+        assert context["project_key"] == "example.test/repo"
     return {"ok": True}
 
 
@@ -402,6 +728,12 @@ def add_project_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project-key")
     parser.add_argument("--project-description")
     parser.add_argument("--project-priority")
+    parser.add_argument(
+        "--write-local-context",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write .taskradar/project.json and add .taskradar/ to .gitignore.",
+    )
 
 
 def add_agent_args(parser: argparse.ArgumentParser) -> None:
@@ -419,6 +751,7 @@ def add_common_write_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project-id")
     parser.add_argument("--agent-id")
     parser.add_argument("--conversation-id")
+    parser.add_argument("--handoff-file", help="Read same-machine subagent context JSON.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -428,6 +761,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     project = subparsers.add_parser("ensure-project")
     add_project_args(project)
+
+    join = subparsers.add_parser("join-project")
+    add_project_args(join)
+
+    subparsers.add_parser("list-projects")
+    subparsers.add_parser("current-project")
 
     agent = subparsers.add_parser("ensure-agent")
     add_common_write_args(agent)
@@ -466,11 +805,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    config = load_config()
+    config = apply_handoff(args, load_config())
     args.dry_run = bool(args.dry_run)
 
     handlers = {
         "ensure-project": ensure_project,
+        "join-project": join_project,
+        "list-projects": list_projects,
+        "current-project": current_project,
         "ensure-agent": ensure_agent,
         "ensure-task": ensure_task,
         "status": patch_status,

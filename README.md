@@ -19,6 +19,13 @@ ln -s "$(pwd)/taskradar-web" ~/.codex/skills/taskradar-web
 
 Then invoke it as `$taskradar-web`.
 
+Optional CLI wrapper:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s "$(pwd)/taskradar-web/bin/taskradar" ~/.local/bin/taskradar
+```
+
 ## Configure Token
 
 Do not paste your `tr_pat_` token into chat.
@@ -51,12 +58,24 @@ TASKRADAR_AGENT_TOKEN=tr_pat_xxx
 
 Environment variables override the config file.
 
+## Join A Project
+
+Join or refresh the current project without exposing your token:
+
+```bash
+taskradar join-project \
+  --project-key "gitlab.udyun.net/opc/paid-items/taskradar-web" \
+  --project-title "TaskRadar Web"
+```
+
+This writes non-sensitive context to `.taskradar/project.json`, adds
+`.taskradar/` to `.gitignore`, and refreshes
+`~/.config/taskradar-skill/projects.json`.
+
 ## Dry Run
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py --dry-run ensure-task \
-  --project-title "TaskRadar Web" \
-  --project-key "taskradar-web" \
+taskradar --dry-run ensure-task \
   --title "Example tracked task" \
   --next-action "Run smoke test"
 ```
@@ -66,17 +85,15 @@ python3 taskradar-web/scripts/taskradar_agent.py --dry-run ensure-task \
 This does not need a token and does not call the network:
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py self-test
+taskradar self-test
 ```
 
 ## Real Write
 
-After token setup:
+After token setup and `join-project`:
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py ensure-task \
-  --project-title "TaskRadar Web" \
-  --project-key "taskradar-web" \
+taskradar ensure-task \
   --title "Example tracked task" \
   --next-action "Run smoke test"
 ```

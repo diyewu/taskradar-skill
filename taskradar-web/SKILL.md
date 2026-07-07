@@ -55,6 +55,15 @@ TASKRADAR_AGENT_TOKEN=tr_pat_xxx
 
 The helper script reads environment variables first, then `~/.config/taskradar-skill/env`.
 
+Project join context is not secret. The helper stores it in:
+
+```text
+.taskradar/project.json
+~/.config/taskradar-skill/projects.json
+```
+
+The helper adds `.taskradar/` to the current project's `.gitignore` by default.
+
 For a subagent session, configure the parent context locally instead of asking
 the user for it in chat:
 
@@ -73,24 +82,42 @@ together for child task writes.
 1. Decide whether the conversation is task-worthy.
 2. Ask the user to confirm before creating a task.
 3. Load token configuration without asking for the token in chat.
-4. Ensure the project with `/agent/projects/ensure`.
-5. Ensure the agent with `/agent/agents/ensure`.
-6. Ensure the task with `/agent/tasks/ensure`.
-7. Store the returned `task_id` in the current conversation context.
-8. Update the same task for progress, waiting, blockers, reminders, and completion.
+4. Resolve project context from CLI flags, subagent handoff, `.taskradar/project.json`, the global registry, git remote, or cwd.
+5. Ensure the project with `/agent/projects/ensure`.
+6. Ensure the agent with `/agent/agents/ensure`.
+7. Ensure the task with `/agent/tasks/ensure`.
+8. Store the returned `task_id` in the current conversation context.
+9. Update the same task for progress, waiting, blockers, reminders, and completion.
 
 Read `references/api.md` when you need exact fields.
 
 ## Helper Script
 
-Use `scripts/taskradar_agent.py` for reliable API calls.
+Use `scripts/taskradar_agent.py` for reliable API calls. The external CLI display
+name is `taskradar`; `bin/taskradar` is a small wrapper around the helper.
+
+Join or refresh a project:
+
+```bash
+taskradar join-project \
+  --project-key "gitlab.udyun.net/opc/paid-items/taskradar-web" \
+  --project-title "TaskRadar Web"
+```
+
+This command contains no token. Each machine still needs its own local
+`TASKRADAR_AGENT_TOKEN`.
+
+Check current project context:
+
+```bash
+taskradar current-project
+taskradar list-projects
+```
 
 Dry-run a task payload without a token:
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py --dry-run ensure-task \
-  --project-title "TaskRadar Web" \
-  --project-key "taskradar-web" \
+taskradar --dry-run ensure-task \
   --title "Implement email verification countdown" \
   --next-action "Run frontend smoke"
 ```
@@ -112,12 +139,21 @@ python3 taskradar-web/scripts/taskradar_agent.py --dry-run ensure-task \
 If the subagent context is already configured in env, omit the parent flags and
 only pass the task fields.
 
+Same-machine subagent sessions can also pass a non-secret handoff file:
+
+```bash
+taskradar --dry-run ensure-task \
+  --handoff-file .taskradar/handoffs/subagent-123.json \
+  --title "Verify child task write" \
+  --next-action "Write child event"
+```
+
+Subagent handoff is same-machine only; do not use it as a cross-machine protocol.
+
 Create or reuse a real task after token setup:
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py ensure-task \
-  --project-title "TaskRadar Web" \
-  --project-key "taskradar-web" \
+taskradar ensure-task \
   --title "Implement email verification countdown" \
   --next-action "Run frontend smoke"
 ```
@@ -125,7 +161,7 @@ python3 taskradar-web/scripts/taskradar_agent.py ensure-task \
 Update an existing task:
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py status \
+taskradar status \
   --task-id 123 \
   --status waiting_user \
   --next-action "Waiting for manual verification"
@@ -134,7 +170,7 @@ python3 taskradar-web/scripts/taskradar_agent.py status \
 Write an event:
 
 ```bash
-python3 taskradar-web/scripts/taskradar_agent.py event \
+taskradar event \
   --task-id 123 \
   --message "Frontend build passed"
 ```

@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+set -eu
+TARGET=$0
+while [ -L "$TARGET" ]; do
+  DIR=$(CDPATH= cd -- "$(dirname -- "$TARGET")" && pwd)
+  TARGET=$(readlink "$TARGET")
+  case "$TARGET" in
+    /*) ;;
+    *) TARGET=$DIR/$TARGET ;;
+  esac
+done
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$TARGET")" && pwd)
+exec python3 "$SCRIPT_DIR/../scripts/taskradar_agent.py" "$@"

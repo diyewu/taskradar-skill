@@ -32,6 +32,24 @@ Notes:
 - If `external_project_key` is omitted, backend falls back to `user_id + title`.
 - Use `data.id` as `project_id`.
 
+The skill stores non-secret project join context locally:
+
+```text
+.taskradar/project.json
+~/.config/taskradar-skill/projects.json
+```
+
+Cross-machine main agents should join with a non-secret command:
+
+```bash
+taskradar join-project \
+  --project-key "repo-or-workspace-key" \
+  --project-title "TaskRadar Web"
+```
+
+This command does not contain a token. Each machine must configure its own
+user-level `tr_pat_` token locally.
+
 ## Agent Ensure
 
 ```text
@@ -85,6 +103,10 @@ Use `external_conversation_id`. One conversation should usually map to one task.
 TASKRADAR_PARENT_TASK_ID=789
 TASKRADAR_SPAWNED_BY_AGENT_ID=123
 ```
+
+Subagent handoff is same-machine only. A handoff file may provide
+`project_key`, `project_title`, `project_id`, `parent_agent_id`,
+`parent_task_id`, and `spawned_by_agent_id`; it must not contain a token.
 
 ## Task Status
 

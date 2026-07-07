@@ -55,6 +55,19 @@ TASKRADAR_AGENT_TOKEN=tr_pat_xxx
 
 The helper script reads environment variables first, then `~/.config/taskradar-skill/env`.
 
+For a subagent session, configure the parent context locally instead of asking
+the user for it in chat:
+
+```bash
+TASKRADAR_AGENT_ROLE=subagent
+TASKRADAR_PARENT_AGENT_ID=123
+TASKRADAR_PARENT_TASK_ID=789
+TASKRADAR_SPAWNED_BY_AGENT_ID=123
+```
+
+`TASKRADAR_PARENT_TASK_ID` and `TASKRADAR_SPAWNED_BY_AGENT_ID` must be set
+together for child task writes.
+
 ## Workflow
 
 1. Decide whether the conversation is task-worthy.
@@ -81,6 +94,23 @@ python3 taskradar-web/scripts/taskradar_agent.py --dry-run ensure-task \
   --title "Implement email verification countdown" \
   --next-action "Run frontend smoke"
 ```
+
+Dry-run a subagent child task:
+
+```bash
+python3 taskradar-web/scripts/taskradar_agent.py --dry-run ensure-task \
+  --project-title "TaskRadar Web" \
+  --project-key "taskradar-web" \
+  --agent-role subagent \
+  --parent-agent-id 123 \
+  --parent-task-id 789 \
+  --spawned-by-agent-id 123 \
+  --title "Verify child task write" \
+  --next-action "Write child event"
+```
+
+If the subagent context is already configured in env, omit the parent flags and
+only pass the task fields.
 
 Create or reuse a real task after token setup:
 

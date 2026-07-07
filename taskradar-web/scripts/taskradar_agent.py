@@ -167,6 +167,15 @@ def agent_payload(
     project_id: str,
     conversation_id: str,
 ) -> dict[str, Any]:
+    role = args.agent_role or config.get("TASKRADAR_AGENT_ROLE") or "main"
+    parent_agent_id = args.parent_agent_id or config.get("TASKRADAR_PARENT_AGENT_ID")
+    if role not in ("main", "subagent"):
+        raise SystemExit("TASKRADAR_AGENT_ROLE must be main or subagent.")
+    if role == "subagent" and not parent_agent_id:
+        raise SystemExit("Subagent writes require TASKRADAR_PARENT_AGENT_ID or --parent-agent-id.")
+    if role != "subagent" and parent_agent_id:
+        raise SystemExit("parent_agent_id is only valid when agent role is subagent.")
+
     return {
         "project_id": project_id,
         "name": args.agent_name or config.get("TASKRADAR_AGENT_NAME") or DEFAULT_AGENT_NAME,
@@ -175,6 +184,8 @@ def agent_payload(
         or DEFAULT_AGENT_PROVIDER,
         "session_name": args.session_name or config.get("TASKRADAR_SESSION_NAME") or conversation_id,
         "external_session_id": args.session_id or config.get("TASKRADAR_SESSION_ID") or conversation_id,
+        "role": role,
+        **optional_id("parent_agent_id", parent_agent_id),
     }
 
 
@@ -203,13 +214,24 @@ def ensure_agent(
 
 def task_payload(
     args: argparse.Namespace,
+    config: dict[str, str],
     project_id: str,
     agent_id: str,
     conversation_id: str,
 ) -> dict[str, Any]:
+    parent_task_id = args.parent_task_id or config.get("TASKRADAR_PARENT_TASK_ID")
+    spawned_by_agent_id = args.spawned_by_agent_id or config.get("TASKRADAR_SPAWNED_BY_AGENT_ID")
+    if bool(parent_task_id) != bool(spawned_by_agent_id):
+        raise SystemExit(
+            "Child task writes require both TASKRADAR_PARENT_TASK_ID and "
+            "TASKRADAR_SPAWNED_BY_AGENT_ID, or both CLI flags."
+        )
+
     return {
         "project_id": project_id,
         "agent_id": agent_id,
+        **optional_id("parent_task_id", parent_task_id),
+        **optional_id("spawned_by_agent_id", spawned_by_agent_id),
         "external_conversation_id": conversation_id,
         "title": args.title,
         "description": args.description or "",
@@ -218,6 +240,10 @@ def task_payload(
         "next_action": args.next_action or "",
         "needs_user_attention": args.needs_user_attention,
     }
+
+
+def optional_id(key: str, value: str | None) -> dict[str, str]:
+    return {key: value} if value else {}
 
 
 def ensure_task(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any]:
@@ -241,7 +267,7 @@ def ensure_task(args: argparse.Namespace, config: dict[str, str]) -> dict[str, A
         requests.append(agent_response["request"] if args.dry_run else agent_response)
         agent_id = str(data_from(agent_response).get("id", "__AGENT_ID__"))
 
-    payload = task_payload(args, project_id, agent_id, conversation_id)
+    payload = task_payload(args, config, project_id, agent_id, conversation_id)
     if args.dry_run:
         requests.append({"method": "POST", "path": "/agent/tasks/ensure", "body": payload})
         return {
@@ -302,6 +328,7 @@ def self_test(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any
     assert normalize_base_url("https://x/app-api/taskradar/agent") == "https://x/app-api/taskradar"
     assert slug("TaskRadar Web!") == "taskradar-web"
     assert parse_remind_at("1782963000000") == 1782963000000
+    test_config: dict[str, str] = {}
 
     args.dry_run = True
     args.project_title = "TaskRadar Web"
@@ -312,20 +339,61 @@ def self_test(args: argparse.Namespace, config: dict[str, str]) -> dict[str, Any
     args.agent_provider = None
     args.session_name = None
     args.session_id = None
+    args.agent_role = None
+    args.parent_agent_id = None
     args.project_id = None
     args.agent_id = None
     args.conversation_id = "self-test"
+    args.parent_task_id = None
+    args.spawned_by_agent_id = None
     args.title = "Self test task"
     args.description = None
     args.status = "active"
     args.urgency = "normal"
     args.next_action = "Verify dry-run payload"
     args.needs_user_attention = False
-    result = ensure_task(args, config)
+    result = ensure_task(args, test_config)
     assert len(result["requests"]) == 3
     assert result["requests"][0]["path"] == "/agent/projects/ensure"
     assert result["requests"][1]["body"]["external_session_id"] == "self-test"
+    assert result["requests"][1]["body"]["role"] == "main"
     assert result["requests"][2]["body"]["external_conversation_id"] == "self-test"
+
+    args.agent_role = "subagent"
+    args.parent_agent_id = "100"
+    args.agent_id = None
+    args.parent_task_id = "200"
+    args.spawned_by_agent_id = "100"
+    result = ensure_task(args, test_config)
+    assert result["requests"][1]["body"]["role"] == "subagent"
+    assert result["requests"][1]["body"]["parent_agent_id"] == "100"
+    assert result["requests"][2]["body"]["parent_task_id"] == "200"
+    assert result["requests"][2]["body"]["spawned_by_agent_id"] == "100"
+
+    args.agent_role = None
+    args.parent_agent_id = None
+    args.parent_task_id = None
+    args.spawned_by_agent_id = None
+    subagent_config = {
+        **test_config,
+        "TASKRADAR_AGENT_ROLE": "subagent",
+        "TASKRADAR_PARENT_AGENT_ID": "100",
+        "TASKRADAR_PARENT_TASK_ID": "200",
+        "TASKRADAR_SPAWNED_BY_AGENT_ID": "100",
+    }
+    result = ensure_task(args, subagent_config)
+    assert result["requests"][1]["body"]["role"] == "subagent"
+    assert result["requests"][1]["body"]["parent_agent_id"] == "100"
+    assert result["requests"][2]["body"]["parent_task_id"] == "200"
+    assert result["requests"][2]["body"]["spawned_by_agent_id"] == "100"
+
+    args.agent_role = "subagent"
+    try:
+        ensure_agent(args, test_config, "__PROJECT_ID__", "self-test")
+    except SystemExit as exc:
+        assert "parent-agent-id" in str(exc)
+    else:
+        raise AssertionError("subagent without parent_agent_id should fail")
     return {"ok": True}
 
 
@@ -341,6 +409,8 @@ def add_agent_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent-provider")
     parser.add_argument("--session-name")
     parser.add_argument("--session-id")
+    parser.add_argument("--agent-role", choices=("main", "subagent"))
+    parser.add_argument("--parent-agent-id")
 
 
 def add_common_write_args(parser: argparse.ArgumentParser) -> None:
@@ -370,6 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
     task.add_argument("--urgency", default="normal")
     task.add_argument("--next-action")
     task.add_argument("--needs-user-attention", action="store_true")
+    task.add_argument("--parent-task-id")
+    task.add_argument("--spawned-by-agent-id")
 
     status = subparsers.add_parser("status")
     status.add_argument("--task-id", required=True)

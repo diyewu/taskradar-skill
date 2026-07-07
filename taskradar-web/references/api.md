@@ -28,8 +28,8 @@ POST /agent/projects/ensure
 Notes:
 
 - Token is user-level, not project-level.
-- Current backend idempotency is `user_id + title`.
-- `external_project_key` is accepted but is not the unique key yet.
+- Backend idempotency prefers `user_id + external_project_key`.
+- If `external_project_key` is omitted, backend falls back to `user_id + title`.
 - Use `data.id` as `project_id`.
 
 ## Agent Ensure
@@ -44,13 +44,17 @@ POST /agent/agents/ensure
   "name": "Codex",
   "provider": "codex",
   "session_name": "Local session",
-  "external_session_id": "codex-session-abc"
+  "external_session_id": "codex-session-abc",
+  "role": "subagent",
+  "parent_agent_id": "123"
 }
 ```
 
 Use `external_session_id`. Do not send `external_agent_id`.
 
 Use `data.id` as `agent_id`.
+
+`role` defaults to `main`. Use `role=subagent` with `parent_agent_id` to link a child agent to a parent agent in the same project. The helper script rejects `subagent` writes without `parent_agent_id`.
 
 ## Task Ensure
 
@@ -62,6 +66,8 @@ POST /agent/tasks/ensure
 {
   "project_id": "123",
   "agent_id": "456",
+  "parent_task_id": "789",
+  "spawned_by_agent_id": "123",
   "external_conversation_id": "codex-session-abc",
   "title": "Implement task workspace",
   "description": "Track the implementation and verification",
@@ -72,6 +78,13 @@ POST /agent/tasks/ensure
 ```
 
 Use `external_conversation_id`. One conversation should usually map to one task.
+
+`parent_task_id` links a child task to its parent task. `spawned_by_agent_id` records the agent that spawned the child task. Both must belong to the same user and project. In the helper script, set both together with CLI flags or local env:
+
+```bash
+TASKRADAR_PARENT_TASK_ID=789
+TASKRADAR_SPAWNED_BY_AGENT_ID=123
+```
 
 ## Task Status
 
